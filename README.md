@@ -256,6 +256,48 @@ telenium-mcp/
 └── README.md
 ```
 
+## Android Support
+
+telenium-mcp can control Kivy apps running on Android. The MCP server runs on your computer and connects to the Telenium client on the device over the network.
+
+```
+Your PC/Mac                              Android Device
+┌─────────────────────┐                  ┌─────────────────────┐
+│ LLM Client (Claude) │                  │ Kivy App            │
+│        ↕            │                  │ + telenium client   │
+│ telenium-mcp server │ ──── WiFi/adb ──→│ (JSON-RPC :9901)   │
+└─────────────────────┘                  └─────────────────────┘
+```
+
+### Setup
+
+1. Include `telenium` in your `buildozer.spec` requirements
+2. Add the telenium client to your app (`from telenium import install; install()`)
+3. Connect over WiFi or ADB port forwarding
+
+### Option A: WiFi (device IP)
+
+Set the allowed host to your device's IP:
+
+```json
+{
+  "env": {
+    "TELENIUM_ALLOWED_HOST": "192.168.1.100",
+    "TELENIUM_ALLOWED_PORT": "9901"
+  }
+}
+```
+
+### Option B: ADB port forwarding
+
+```bash
+adb forward tcp:9901 tcp:9901
+```
+
+Then use the default `localhost:9901` configuration.
+
+> **Note:** This only works with Kivy-based Android apps, not native Java/Kotlin apps.
+
 ## Troubleshooting
 
 | Problem | Solution |
