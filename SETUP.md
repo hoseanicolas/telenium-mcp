@@ -1,3 +1,171 @@
+# Telenium MCP Server - Setup Guide
+
+Setup MCP server untuk remote control Kivy app via AI assistant (any client yang support MCP SSE).
+
+## Requirements
+
+- Linux server (Debian/Ubuntu)
+- Python 3.10+
+- Port 8901 terbuka
+
+## Install (5 menit)
+
+```bash
+# 1. Buat folder
+sudo mkdir -p /opt/telenium-mcp
+sudo chown $USER:$USER /opt/telenium-mcp
+cd /opt/telenium-mcp
+
+# 2. Buat venv + install deps
+python3 -m venv .venv
+.venv/bin/pip install "mcp[cli]" telenium requests uvicorn starlette
+
+# 3. Buat server.py (lihat section "Source Code" di bawah)
+
+# 4. Buat server_wrapper.py (lihat section "Source Code" di bawah)
+
+# 5. Test
+.venv/bin/python -c "from server import mcp; print('OK')"
+```
+
+## Auto-start (systemd)
+
+```bash
+sudo tee /etc/systemd/system/telenium-mcp.service > /dev/null << 'EOF'
+[Unit]
+Description=Telenium MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/telenium-mcp/.venv/bin/python /opt/telenium-mcp/server_wrapper.py
+WorkingDirectory=/opt/telenium-mcp
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable telenium-mcp
+sudo systemctl start telenium-mcp
+sudo systemctl status telenium-mcp
+```
+
+## Verify
+
+```bash
+# Dari server sendiri (akan hang - normal, SSE streaming):
+curl -s http://localhost:8901/sse
+
+# Dari network lain:
+curl -s http://<SERVER_IP>:8901/sse
+```
+
+## Register di AI Gateway (LiteLLM / dll)
+
+| Field | Value |
+|-------|-------|
+| Name | `telenium` |
+| URL | `http://<DOCKER_GATEWAY_IP>:8901/sse` |
+| Transport | SSE |
+| Auth | none |
+| Access | Public |
+
+> Jika LiteLLM jalan di Docker, gunakan Docker gateway IP (biasanya `172.17.0.1`).
+> Jika LiteLLM jalan di host yang sama, gunakan `http://localhost:8901/sse`.
+
+## Register di MCP Client (Kiro / OpenCode / Claude / dll)
+
+### OpenCode (`~/.config/opencode/opencode.jsonc`):
+```jsonc
+{
+  "mcp": {
+    "telenium": {
+      "type": "sse",
+      "url": "http://<SERVER_IP>:8901/sse",
+      "enabled": true
+    }
+  }
+}
+```
+
+### Kiro (`.kiro/settings/mcp.json` - local stdio mode):
+```json
+{
+  "mcpServers": {
+    "telenium": {
+      "command": "/opt/telenium-mcp/.venv/bin/python",
+      "args": ["/opt/telenium-mcp/server.py"],
+      "env": {
+        "TELENIUM_ALLOWED_HOST": "localhost",
+        "TELENIUM_ALLOWED_PORT": "9901"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "telenium": {
+      "command": "/opt/telenium-mcp/.venv/bin/python",
+      "args": ["/opt/telenium-mcp/server.py"]
+    }
+  }
+}
+```
+
+## Tools Available
+
+| Tool | Fungsi |
+|------|--------|
+| `connect(host, port)` | Connect ke device |
+| `status()` | Cek connection status |
+| `version()` | API version |
+| `execute(code)` | Jalankan Python di app |
+| `evaluate(expr)` | Eval expression, return value |
+| `select(selector)` | Cari widget (XPATH-like) |
+| `click_on(selector)` | Klik widget |
+| `screenshot()` | Screenshot (base64 PNG) |
+| `getattr_(selector, key)` | Ambil atribut widget |
+| `setattr_(selector, key, value)` | Set atribut widget |
+| `wait_click(selector, timeout)` | Tunggu widget muncul + klik |
+| `pick(all)` | Identify widget by touch |
+| `select_and_store(key, selector)` | Simpan widget reference |
+| `evaluate_and_store(key, expr)` | Simpan eval result |
+
+## Connect ke Device
+
+Device harus menjalankan Kivy app dengan Telenium enabled (port 9901).
+
+```
+# Direct (device reachable dari server):
+AI: "connect ke 192.168.1.101:9901"
+
+# Via reverse tunnel (device di jaringan lain):
+# Dari laptop yang satu jaringan dengan device:
+ssh -N -R 9901:<DEVICE_IP>:9901 <SERVER_IP>
+# Lalu AI: "connect ke localhost:9901"
+```
+
+### Multi-device:
+```bash
+ssh -N -R 9901:<DEVICE1_IP>:9901 -R 9902:<DEVICE2_IP>:9901 -R 9903:<DEVICE3_IP>:9901 <SERVER_IP>
+```
+AI: `"connect ke localhost:9901"` / `"connect ke localhost:9902"` / `"connect ke localhost:9903"`
+
+---
+
+## Source Code
+
+### server.py
+
+```python
 """Telenium MCP Server - exposes Kivy app automation as MCP tools."""
 
 from __future__ import annotations
@@ -229,29 +397,58 @@ def evaluate_and_store(key: str, expr: str) -> bool:
 def main():
     """Entry point for the MCP server."""
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
-    
-    transport = os.environ.get("MCP_TRANSPORT", "sse")
-    host = os.environ.get("MCP_HOST", "0.0.0.0")
-    port = int(os.environ.get("MCP_PORT", "8901"))
-    
-    if transport == "sse":
-        import uvicorn
-        from starlette.middleware import Middleware
-        from starlette.middleware.trustedhost import TrustedHostMiddleware
-        
-        app = mcp.sse_app()
-        # Wrap to allow any host
-        from starlette.applications import Starlette
-        from starlette.routing import Mount
-        
-        wrapper = Starlette(
-            routes=[Mount("/", app=app)],
-            middleware=[Middleware(TrustedHostMiddleware, allowed_hosts=["*"])]
-        )
-        uvicorn.run(wrapper, host=host, port=port)
-    else:
-        mcp.run()
+    mcp.run()
 
 
 if __name__ == "__main__":
     main()
+```
+
+### server_wrapper.py
+
+```python
+"""Wrapper that disables host validation for MCP SSE server."""
+import os
+os.environ["MCP_TRANSPORT"] = "sse"
+os.environ["MCP_HOST"] = "0.0.0.0"
+os.environ["MCP_PORT"] = "8901"
+
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+class HostRewriteMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] in ("http", "websocket"):
+            new_headers = []
+            for k, v in scope.get("headers", []):
+                if k == b"host":
+                    new_headers.append((b"host", b"localhost:8901"))
+                else:
+                    new_headers.append((k, v))
+            scope = dict(scope)
+            scope["headers"] = new_headers
+        await self.app(scope, receive, send)
+
+import sys
+sys.path.insert(0, "/opt/telenium-mcp")
+from server import mcp
+
+import uvicorn
+
+app = HostRewriteMiddleware(mcp.sse_app())
+uvicorn.run(app, host="0.0.0.0", port=8901)
+```
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Unhealthy di LiteLLM | `sudo systemctl restart telenium-mcp` |
+| Connection refused | Cek port 8901 open: `ss -tlnp \| grep 8901` |
+| Invalid Host header | Pastikan pakai `server_wrapper.py` (bukan `server.py` langsung) |
+| Device not reachable | Cek tunnel aktif / device satu jaringan |
+| `Not connected` error | AI harus call `connect(host, port)` dulu sebelum action lain |
